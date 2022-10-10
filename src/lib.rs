@@ -1,18 +1,22 @@
-#[allow(non_snake_case)]
-#[allow(clippy::many_single_char_names)]
+#![allow(non_snake_case)]
+#![allow(clippy::many_single_char_names)]
 
-// pub type ConstraintF = ark_bn254::Fr;
-// pub type ConstraintF = ark_ed_on_bn254::Fq; // base field
-pub type ConstraintF = ark_ed_on_bn254::Fr; // scalar field
+// #[cfg(feature="r1cs")]
+pub mod constraints;
 
-use ark_ec::{AffineCurve, ProjectiveCurve, TEModelParameters};
-use ark_ed_on_bn254::{EdwardsAffine, EdwardsParameters, EdwardsProjective, FqParameters, Fr};
-use ark_ff::{
-    to_bytes, BigInteger, BigInteger256, Field, Fp256, FpParameters, One, PrimeField, Zero,
+use ark_ec::{
+    models::twisted_edwards_extended::GroupAffine, AffineCurve, ProjectiveCurve, TEModelParameters,
 };
 
+use ark_ff::{
+    to_bytes, BigInteger, BigInteger256, Field, Fp256, FpParameters, FromBytes, One, PrimeField,
+    Zero,
+};
+
+use ark_std::marker::PhantomData;
 use ark_std::rand::{CryptoRng, RngCore};
-use ark_std::UniformRand;
+use ark_std::{ops::Mul, rand::Rng, UniformRand};
+use derivative::Derivative;
 
 // hash
 use arkworks_native_gadgets::poseidon;
@@ -21,24 +25,174 @@ use arkworks_utils::{
     bytes_matrix_to_f, bytes_vec_to_f, parse_vec, poseidon_params::setup_poseidon_params, Curve,
 };
 
-const GX: Fp256<FqParameters> = <EdwardsParameters as TEModelParameters>::AFFINE_GENERATOR_COEFFS.0;
-const GY: Fp256<FqParameters> = <EdwardsParameters as TEModelParameters>::AFFINE_GENERATOR_COEFFS.1;
+// WIP
+use ark_ed_on_bn254::{
+    EdwardsAffine, EdwardsParameters, EdwardsProjective, FqParameters, Fr, FrParameters,
+};
 
-#[macro_use]
-extern crate lazy_static;
+pub type SecretKey<C> = <C as ProjectiveCurve>::ScalarField;
+pub type PublicKey<C> = <C as ProjectiveCurve>::Affine;
+pub type BlindedSignature<C> = <C as ProjectiveCurve>::ScalarField;
 
-lazy_static! {
-    static ref G_AFFINE: EdwardsAffine = EdwardsAffine::new(GX, GY);
-    static ref G: EdwardsProjective = G_AFFINE.into_projective();
+// #[derive(Derivative)]
+#[derive(Clone, Default, Debug)]
+pub struct Signature<C: ProjectiveCurve> {
+    s: C::ScalarField, // ScalarField == Fr
+    r: <C as ProjectiveCurve>::Affine,
 }
 
-// Fr modulus (bigendian)
-const FR_MODULUS: BigInteger256 = BigInteger256::new([
-    0x677297DC392126F1,
-    0xAB3EEDB83920EE0A,
-    0x370A08B6D0302B0B,
-    0x060C89CE5C263405,
-]);
+#[derive(Debug)]
+pub struct UserSecretData<C: ProjectiveCurve> {
+    a: C::ScalarField,
+    b: C::ScalarField,
+    r: C::Affine,
+}
+impl<C: ProjectiveCurve> UserSecretData<C> {
+    fn new_empty(parameters: &Parameters<C>) -> Self {
+        UserSecretData {
+            a: C::ScalarField::from(0 as u32),
+            b: C::ScalarField::from(0 as u32),
+            r: parameters.generator, // WIP
+        }
+    }
+}
+
+#[derive(Derivative)]
+#[derivative(Clone(bound = "C: ProjectiveCurve"), Debug)]
+pub struct Parameters<C: ProjectiveCurve> {
+    pub generator: C::Affine,
+}
+
+pub struct BlindSigScheme<C: ProjectiveCurve> {
+    _group: PhantomData<C>,
+}
+
+impl<C: ProjectiveCurve> BlindSigScheme<C>
+where
+    C::ScalarField: PrimeField,
+    GroupAffine<EdwardsParameters>: From<<C as ProjectiveCurve>::Affine>, // WIP
+{
+    pub fn setup() -> Parameters<C> {
+        let generator = C::prime_subgroup_generator().into();
+        Parameters { generator }
+    }
+
+    // signer
+    pub fn keygen<R: Rng>(parameters: &Parameters<C>, rng: &mut R) -> (PublicKey<C>, SecretKey<C>) {
+        let secret_key = C::ScalarField::rand(rng);
+        let public_key = parameters.generator.mul(secret_key).into();
+        (public_key, secret_key)
+    }
+
+    pub fn new_request_params<R: Rng>(
+        parameters: &Parameters<C>,
+        rng: &mut R,
+    ) -> (C::ScalarField, C::Affine) {
+        let k = C::ScalarField::rand(rng);
+        let R = parameters.generator.mul(k).into();
+        (k, R)
+    }
+
+    pub fn blind_sign(
+        sk: SecretKey<C>,
+        k: C::ScalarField,
+        m_blinded: C::ScalarField,
+    ) -> BlindedSignature<C> {
+        sk * m_blinded + k
+    }
+
+    // requester
+    pub fn new_blind_params<R: Rng>(
+        parameters: &Parameters<C>,
+        rng: &mut R,
+        signer_r: C::Affine,
+    ) -> UserSecretData<C>
+    where
+        <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
+    {
+        let mut u: UserSecretData<C> = UserSecretData::new_empty(parameters);
+        u.a = C::ScalarField::rand(rng);
+        u.b = C::ScalarField::rand(rng);
+
+        // R = aR' + bG
+        let aR = signer_r.mul(u.a.into_repr());
+        let bG = parameters.generator.mul(u.b.into_repr());
+        u.r = aR.into_affine() + bG.into_affine();
+
+        let r = EdwardsAffine::from(u.r); // WIP
+        let one = BigInteger256::from(1u64);
+        let x_repr = r.x.into_repr();
+        let modulus = <<C::ScalarField as PrimeField>::Params as FpParameters>::MODULUS;
+        let modulus_repr = BigInteger256::try_from(modulus.into()).unwrap();
+
+        if !(x_repr >= one && x_repr < modulus_repr) {
+            return Self::new_blind_params(parameters, rng, signer_r);
+        }
+        u
+    }
+
+    pub fn blind<R: Rng>(
+        parameters: &Parameters<C>,
+        rng: &mut R,
+        poseidon_hash: &poseidon::Poseidon<C::ScalarField>,
+        m: C::ScalarField,
+        signer_r: C::Affine,
+    ) -> Result<(C::ScalarField, UserSecretData<C>), ark_crypto_primitives::Error>
+    where
+        <C as ProjectiveCurve>::ScalarField: Mul<Fp256<FrParameters>>,
+        <C as ProjectiveCurve>::ScalarField:
+            From<<<C as ProjectiveCurve>::ScalarField as Mul<Fp256<FrParameters>>>::Output>,
+        <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
+    {
+        let u = Self::new_blind_params(parameters, rng, signer_r);
+        // get X coordinate, as in new_blind_params we already checked that R.x is inside Fr and
+        // will not give None
+        let r = EdwardsAffine::from(u.r); // WIP
+        let x_fr = C::ScalarField::from(r.x.into_repr());
+
+        // m' = a^-1 rx h(m)
+        let h_m = poseidon_hash.hash(&[m])?;
+        let m_blinded = C::ScalarField::from(u.a.inverse().unwrap() * x_fr) * h_m;
+
+        Ok((m_blinded, u))
+    }
+
+    pub fn unblind(s_blinded: C::ScalarField, u: UserSecretData<C>) -> Signature<C> {
+        // s = a s' + b
+        let s = u.a * s_blinded + u.b;
+        Signature { s, r: u.r }
+    }
+
+    pub fn verify(
+        parameters: &Parameters<C>,
+        poseidon_hash: &poseidon::Poseidon<C::ScalarField>,
+        m: C::ScalarField,
+        s: Signature<C>,
+        q: PublicKey<C>,
+    ) -> bool
+    where
+        <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
+    {
+        let sG = parameters.generator.mul(s.s.into_repr());
+
+        let h_m = poseidon_hash.hash(&[m]).unwrap();
+
+        // check that s.R.x is in Fr
+        let r = EdwardsAffine::from(s.r); // WIP
+        let one = BigInteger256::from(1u64);
+        let x_repr = r.x.into_repr();
+        let modulus = <<C::ScalarField as PrimeField>::Params as FpParameters>::MODULUS;
+        let modulus_repr = BigInteger256::try_from(modulus.into()).unwrap();
+        if !(x_repr >= one && x_repr < modulus_repr) {
+            return false;
+        }
+        // get s.R.x
+        let x_fr = C::ScalarField::from(r.x.into_repr());
+        let right = s.r + q.mul((x_fr * h_m).into_repr()).into_affine();
+
+        sG.into_affine() == right
+    }
+}
 
 // poseidon
 pub fn poseidon_setup_params<F: PrimeField>(
@@ -61,115 +215,10 @@ pub fn poseidon_setup_params<F: PrimeField>(
     }
 }
 
-pub struct PrivateKey(ConstraintF);
-pub type PublicKey = EdwardsAffine;
-pub type BlindedSignature = ConstraintF;
-pub struct Signature {
-    s: ConstraintF,
-    r: EdwardsAffine,
-}
-
-#[derive(Debug)]
-pub struct UserSecretData {
-    a: ConstraintF,
-    b: ConstraintF,
-    r: EdwardsAffine,
-}
-impl UserSecretData {
-    fn new_empty() -> Self {
-        UserSecretData {
-            a: ConstraintF::from(0),
-            b: ConstraintF::from(0),
-            r: G_AFFINE.clone(), // WIP
-        }
-    }
-}
-
-pub fn new_sk<R: RngCore>(rng: &mut R) -> PrivateKey {
-    let sk: PrivateKey = PrivateKey(ConstraintF::rand(rng));
-    sk
-}
-
-impl PrivateKey {
-    pub fn public(&self) -> PublicKey {
-        let pk: PublicKey = G.mul(self.0.into_repr()).into_affine();
-        pk
-    }
-    pub fn blind_sign(&self, m_blinded: ConstraintF, k: ConstraintF) -> BlindedSignature {
-        self.0 * m_blinded + k
-    }
-}
-
-pub fn new_request_params<R: RngCore>(rng: &mut R) -> (ConstraintF, EdwardsAffine) {
-    let k = ConstraintF::rand(rng);
-    let R = G.mul(k.into_repr()).into_affine();
-    (k, R)
-}
-
-fn new_blind_params<R: RngCore>(rng: &mut R, signer_r: EdwardsAffine) -> UserSecretData {
-    let mut u: UserSecretData = UserSecretData::new_empty();
-    u.a = ConstraintF::rand(rng);
-    u.b = ConstraintF::rand(rng);
-
-    // R = aR' + bG
-    let aR = signer_r.mul(u.a.into_repr());
-    let bG = G.mul(u.b.into_repr());
-    u.r = aR.into_affine() + bG.into_affine();
-
-    // check that u.r.x can be safely converted into Fr, and if not, choose other u.a & u.b values
-    let x_repr = u.r.x.into_repr();
-    if !(x_repr >= ConstraintF::one().into_repr() && x_repr < FR_MODULUS) {
-        return new_blind_params(rng, signer_r);
-    }
-    return u;
-}
-
-pub fn blind<R: RngCore>(
-    rng: &mut R,
-    poseidon_hash: &poseidon::Poseidon<ConstraintF>,
-    m: ConstraintF,
-    signer_r: EdwardsAffine,
-) -> Result<(ConstraintF, UserSecretData), ark_crypto_primitives::Error> {
-    let u = new_blind_params(rng, signer_r);
-    // use unwrap, as we already checked that R.x is inside Fr and will not give None
-    let x_fr = ConstraintF::from_repr(u.r.x.into_repr()).unwrap();
-
-    // m' = a^-1 rx h(m)
-    let h_m = poseidon_hash.hash(&[m])?;
-    let m_blinded = u.a.inverse().unwrap() * x_fr * h_m;
-
-    Ok((m_blinded, u))
-}
-
-pub fn unblind(s_blinded: ConstraintF, u: UserSecretData) -> Signature {
-    // s = a s' + b
-    let s = u.a * s_blinded + u.b;
-    Signature { s, r: u.r }
-}
-
-pub fn verify(
-    poseidon_hash: &poseidon::Poseidon<ConstraintF>,
-    m: ConstraintF,
-    s: Signature,
-    q: PublicKey,
-) -> bool {
-    let sG = G.mul(s.s.into_repr());
-
-    let h_m = poseidon_hash.hash(&[m]).unwrap();
-
-    let x_repr = s.r.x.into_repr();
-    if !(x_repr >= ConstraintF::one().into_repr() && x_repr < FR_MODULUS) {
-        return false; // error, s.r.x does not fit in Fr
-    }
-    let x_fr = ConstraintF::from_repr(s.r.x.into_repr()).unwrap();
-    let right = s.r + q.mul((x_fr * h_m).into_repr()).into_affine();
-
-    sG.into_affine() == right
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    pub type ConstraintF = ark_ed_on_bn254::Fr; // scalar field
 
     #[test]
     fn test_blind() {
@@ -178,19 +227,28 @@ mod tests {
 
         let mut rng = ark_std::test_rng();
 
-        let sk = new_sk(&mut rng);
-        let pk = sk.public();
+        let params = BlindSigScheme::<EdwardsProjective>::setup();
+        let (pk, sk) = BlindSigScheme::<EdwardsProjective>::keygen(&params, &mut rng);
 
-        let (k, signer_r) = new_request_params(&mut rng);
+        let (k, signer_r) =
+            BlindSigScheme::<EdwardsProjective>::new_request_params(&params, &mut rng);
         let m = ConstraintF::from(1234);
 
-        let (m_blinded, u) = blind(&mut rng, &poseidon_hash, m, signer_r).unwrap();
+        let (m_blinded, u) = BlindSigScheme::<EdwardsProjective>::blind(
+            &params,
+            &mut rng,
+            &poseidon_hash,
+            m,
+            signer_r,
+        )
+        .unwrap();
 
-        let s_blinded = sk.blind_sign(m_blinded, k);
+        let s_blinded = BlindSigScheme::<EdwardsProjective>::blind_sign(sk, k, m_blinded);
 
-        let s = unblind(s_blinded, u);
+        let s = BlindSigScheme::<EdwardsProjective>::unblind(s_blinded, u);
 
-        let verified = verify(&poseidon_hash, m, s, pk);
+        let verified =
+            BlindSigScheme::<EdwardsProjective>::verify(&params, &poseidon_hash, m, s, pk);
         assert!(verified);
     }
 }
