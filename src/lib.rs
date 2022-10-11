@@ -126,6 +126,7 @@ where
         let modulus_repr = BigInteger256::try_from(modulus.into()).unwrap();
 
         if !(x_repr >= one && x_repr < modulus_repr) {
+            // TODO maybe add a counter of attempts with a limit
             return Self::new_blind_params(parameters, rng, signer_r);
         }
         u
