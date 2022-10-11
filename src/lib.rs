@@ -223,33 +223,26 @@ mod tests {
 
     #[test]
     fn test_blind() {
+        type S = BlindSigScheme<EdwardsProjective>;
+
         let poseidon_params = poseidon_setup_params::<ConstraintF>(Curve::Bn254, 5, 3);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
 
         let mut rng = ark_std::test_rng();
 
-        let params = BlindSigScheme::<EdwardsProjective>::setup();
-        let (pk, sk) = BlindSigScheme::<EdwardsProjective>::keygen(&params, &mut rng);
+        let params = S::setup();
+        let (pk, sk) = S::keygen(&params, &mut rng);
 
-        let (k, signer_r) =
-            BlindSigScheme::<EdwardsProjective>::new_request_params(&params, &mut rng);
+        let (k, signer_r) = S::new_request_params(&params, &mut rng);
         let m = ConstraintF::from(1234);
 
-        let (m_blinded, u) = BlindSigScheme::<EdwardsProjective>::blind(
-            &params,
-            &mut rng,
-            &poseidon_hash,
-            m,
-            signer_r,
-        )
-        .unwrap();
+        let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, m, signer_r).unwrap();
 
-        let s_blinded = BlindSigScheme::<EdwardsProjective>::blind_sign(sk, k, m_blinded);
+        let s_blinded = S::blind_sign(sk, k, m_blinded);
 
-        let s = BlindSigScheme::<EdwardsProjective>::unblind(s_blinded, u);
+        let s = S::unblind(s_blinded, u);
 
-        let verified =
-            BlindSigScheme::<EdwardsProjective>::verify(&params, &poseidon_hash, m, s, pk);
+        let verified = S::verify(&params, &poseidon_hash, m, s, pk);
         assert!(verified);
     }
 }

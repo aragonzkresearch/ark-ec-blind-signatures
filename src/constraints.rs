@@ -124,3 +124,60 @@ where
         })
     }
 }
+
+pub struct BlindSigVerifyGadget<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
+where
+    for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
+{
+    params: Parameters<C>,
+    // sig: Signature<C>,
+    _gc: PhantomData<GC>,
+}
+
+impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>> BlindSigVerifyGadget<C, GC>
+where
+    C: ProjectiveCurve,
+    GC: CurveVar<C, ConstraintF<C>>,
+    for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
+    ark_r1cs_std::groups::curves::twisted_edwards::AffineVar<
+        EdwardsParameters,
+        FpVar<Fp256<FqParameters>>,
+    >: From<GC>,
+    FpVar<<C as ProjectiveCurve>::ScalarField>: Mul<FpVar<Fp256<FqParameters>>>,
+    FpVar<<C as ProjectiveCurve>::ScalarField>: From<<C as ProjectiveCurve>::ScalarField>,
+{
+    fn verify(
+        parameters: &ParametersVar<C, GC>,
+        poseidon_hash: &PoseidonGadget<ConstraintF<C>>,
+        m: FpVar<ConstraintF<C>>,
+        s: &SignatureVar<C, GC>,
+        q: &PublicKeyVar<C, GC>,
+    ) -> Result<Boolean<ConstraintF<C>>, SynthesisError>
+    where
+        <C as ProjectiveCurve>::ScalarField: Iterator, // WIP
+        <C as ProjectiveCurve>::ScalarField: From<
+            <FpVar<<C as ProjectiveCurve>::ScalarField> as Mul<FpVar<Fp256<FqParameters>>>>::Output,
+        >,
+    {
+        let s_s = s.s.clone();
+
+        let sG = parameters
+            .generator
+            .scalar_mul_le(s_s.to_bits_le()?.iter())?;
+
+        // G * s == R + Q * (R.x * H(m))
+        // Note: in a circuit that aggregates multiple verifications, the hashing step could be
+        // done outside the signature verification, once for all 1 votes and once for all 0 votes,
+        // saving lots of constraints
+        let hm = poseidon_hash.hash(&[m])?;
+        let r = EdwardsVar::from(s.r.clone()); // WIP
+
+        let rx_hm: ConstraintF<C> = ConstraintF::<C>::from(hm * r.x);
+        let rx_hm_fp: FpVar<ConstraintF<C>> = FpVar::<ConstraintF<C>>::from(rx_hm);
+
+        let Q_rx_hm = q.pub_key.scalar_mul_le(rx_hm_fp.to_bits_le()?.iter())?;
+        let RHS = s.r.clone() + Q_rx_hm;
+
+        sG.is_eq(&RHS)
+    }
+}
