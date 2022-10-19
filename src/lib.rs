@@ -30,7 +30,7 @@ use ark_ed_on_bn254::{
     EdwardsAffine, EdwardsParameters, EdwardsProjective, FqParameters, Fr, FrParameters,
 };
 
-type ConstraintF<C> = <<C as ProjectiveCurve>::BaseField as Field>::BasePrimeField;
+pub type ConstraintF<C> = <<C as ProjectiveCurve>::BaseField as Field>::BasePrimeField;
 pub type SecretKey<C> = <C as ProjectiveCurve>::ScalarField;
 pub type PublicKey<C> = <C as ProjectiveCurve>::Affine;
 pub type BlindedSignature<C> = <C as ProjectiveCurve>::ScalarField;
@@ -177,7 +177,7 @@ where
     {
         let sG = parameters.generator.mul(s.s.into_repr());
 
-        // TODO hash(m) must be \in Fr
+        // TODO the output of hash(m) must be \in Fr
         let hm = poseidon_hash.hash(&[m]).unwrap();
         // let hm_fr = C::ScalarField::from_repr(hm.into_repr()).unwrap();
         let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm).unwrap()); // WIP TMP
