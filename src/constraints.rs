@@ -89,6 +89,7 @@ where
             // let s = val.borrow().s;
             let mut s = Vec::<UInt8<ConstraintF<C>>>::new();
             let s_bytes = to_bytes![val.borrow().s].unwrap();
+            #[allow(clippy::needless_range_loop)]
             for i in 0..s_bytes.len() {
                 s.push(UInt8::<ConstraintF<C>>::new_variable(
                     cs.clone(),
@@ -236,6 +237,7 @@ where
             SignatureVar::<C, GC>::new_witness(ark_relations::ns!(cs, "signature"), || {
                 self.signature.ok_or(SynthesisError::AssignmentMissing)
             })?;
+        #[allow(clippy::redundant_clone)]
         let poseidon_hash = PoseidonGadget::<ConstraintF<C>>::from_native(
             &mut cs.clone(),
             self.poseidon_hash_native,

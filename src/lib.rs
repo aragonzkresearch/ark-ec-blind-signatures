@@ -136,8 +136,9 @@ where
         <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
     {
         let u = Self::new_blind_params(parameters, rng, signer_r);
+
         // get X coordinate, as in new_blind_params we already checked that R.x is inside Fr and
-        // will not give None
+        // will not overflow (giving None)
         let r = EdwardsAffine::from(u.r); // WIP
         let x_fr = C::ScalarField::from(r.x.into_repr());
 
