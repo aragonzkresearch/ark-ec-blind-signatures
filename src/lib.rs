@@ -30,6 +30,7 @@ use ark_ed_on_bn254::{
     EdwardsAffine, EdwardsParameters, EdwardsProjective, FqParameters, Fr, FrParameters,
 };
 
+type ConstraintF<C> = <<C as ProjectiveCurve>::BaseField as Field>::BasePrimeField;
 pub type SecretKey<C> = <C as ProjectiveCurve>::ScalarField;
 pub type PublicKey<C> = <C as ProjectiveCurve>::Affine;
 pub type BlindedSignature<C> = <C as ProjectiveCurve>::ScalarField;
@@ -135,14 +136,11 @@ where
     pub fn blind<R: Rng>(
         parameters: &Parameters<C>,
         rng: &mut R,
-        poseidon_hash: &poseidon::Poseidon<C::ScalarField>,
-        m: C::ScalarField,
+        poseidon_hash: &poseidon::Poseidon<ConstraintF<C>>,
+        m: ConstraintF<C>,
         signer_r: C::Affine,
     ) -> Result<(C::ScalarField, UserSecretData<C>), ark_crypto_primitives::Error>
     where
-        <C as ProjectiveCurve>::ScalarField: Mul<Fp256<FrParameters>>,
-        <C as ProjectiveCurve>::ScalarField:
-            From<<<C as ProjectiveCurve>::ScalarField as Mul<Fp256<FrParameters>>>::Output>,
         <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
     {
         let u = Self::new_blind_params(parameters, rng, signer_r);
@@ -152,8 +150,11 @@ where
         let x_fr = C::ScalarField::from(r.x.into_repr());
 
         // m' = a^-1 rx h(m)
-        let h_m = poseidon_hash.hash(&[m])?;
-        let m_blinded = C::ScalarField::from(u.a.inverse().unwrap() * x_fr) * h_m;
+        // TODO hash(m) must be \in Fr
+        let hm = poseidon_hash.hash(&[m])?;
+        // let hm_fr = C::ScalarField::from_repr(hm.into_repr()).unwrap();
+        let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm)?); // WIP TMP
+        let m_blinded = C::ScalarField::from(u.a.inverse().unwrap() * x_fr) * hm_fr;
 
         Ok((m_blinded, u))
     }
@@ -166,8 +167,8 @@ where
 
     pub fn verify(
         parameters: &Parameters<C>,
-        poseidon_hash: &poseidon::Poseidon<C::ScalarField>,
-        m: C::ScalarField,
+        poseidon_hash: &poseidon::Poseidon<ConstraintF<C>>,
+        m: ConstraintF<C>,
         s: Signature<C>,
         q: PublicKey<C>,
     ) -> bool
@@ -176,7 +177,10 @@ where
     {
         let sG = parameters.generator.mul(s.s.into_repr());
 
-        let h_m = poseidon_hash.hash(&[m]).unwrap();
+        // TODO hash(m) must be \in Fr
+        let hm = poseidon_hash.hash(&[m]).unwrap();
+        // let hm_fr = C::ScalarField::from_repr(hm.into_repr()).unwrap();
+        let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm).unwrap()); // WIP TMP
 
         // check that s.R.x is in Fr
         let r = EdwardsAffine::from(s.r); // WIP
@@ -189,7 +193,7 @@ where
         }
         // get s.R.x
         let x_fr = C::ScalarField::from(r.x.into_repr());
-        let right = s.r + q.mul((x_fr * h_m).into_repr()).into_affine();
+        let right = s.r + q.mul((x_fr * hm_fr).into_repr()).into_affine();
 
         sG.into_affine() == right
     }
@@ -219,13 +223,14 @@ pub fn poseidon_setup_params<F: PrimeField>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    pub type ConstraintF = ark_ed_on_bn254::Fr; // scalar field
+    pub type Fq = ark_ed_on_bn254::Fq; // base field
+                                       // pub type Fr = ark_ed_on_bn254::Fr; // scalar field
 
     #[test]
-    fn test_blind() {
+    fn test_blind_signature_flow_native() {
         type S = BlindSigScheme<EdwardsProjective>;
 
-        let poseidon_params = poseidon_setup_params::<ConstraintF>(Curve::Bn254, 5, 3);
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
 
         let mut rng = ark_std::test_rng();
@@ -234,7 +239,7 @@ mod tests {
         let (pk, sk) = S::keygen(&params, &mut rng);
 
         let (k, signer_r) = S::new_request_params(&params, &mut rng);
-        let m = ConstraintF::from(1234);
+        let m = Fq::from(1234);
 
         let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, m, signer_r).unwrap();
 
