@@ -4,31 +4,23 @@
 // #[cfg(feature="r1cs")]
 pub mod constraints;
 
-use ark_ec::{
-    models::twisted_edwards_extended::GroupAffine, AffineCurve, ProjectiveCurve, TEModelParameters,
-};
+use ark_ec::{models::twisted_edwards_extended::GroupAffine, AffineCurve, ProjectiveCurve};
 
-use ark_ff::{
-    to_bytes, BigInteger, BigInteger256, Field, Fp256, FpParameters, FromBytes, One, PrimeField,
-    Zero,
-};
+use ark_ff::{to_bytes, BigInteger256, Field, FpParameters, PrimeField};
 
 use ark_std::marker::PhantomData;
-use ark_std::rand::{CryptoRng, RngCore};
-use ark_std::{ops::Mul, rand::Rng, UniformRand};
+use ark_std::{rand::Rng, UniformRand};
 use derivative::Derivative;
 
 // hash
 use arkworks_native_gadgets::poseidon;
 use arkworks_native_gadgets::poseidon::FieldHasher;
 use arkworks_utils::{
-    bytes_matrix_to_f, bytes_vec_to_f, parse_vec, poseidon_params::setup_poseidon_params, Curve,
+    bytes_matrix_to_f, bytes_vec_to_f, poseidon_params::setup_poseidon_params, Curve,
 };
 
 // WIP
-use ark_ed_on_bn254::{
-    EdwardsAffine, EdwardsParameters, EdwardsProjective, FqParameters, Fr, FrParameters,
-};
+use ark_ed_on_bn254::{EdwardsAffine, EdwardsParameters};
 
 pub type ConstraintF<C> = <<C as ProjectiveCurve>::BaseField as Field>::BasePrimeField;
 pub type SecretKey<C> = <C as ProjectiveCurve>::ScalarField;
@@ -51,8 +43,8 @@ pub struct UserSecretData<C: ProjectiveCurve> {
 impl<C: ProjectiveCurve> UserSecretData<C> {
     fn new_empty(parameters: &Parameters<C>) -> Self {
         UserSecretData {
-            a: C::ScalarField::from(0 as u32),
-            b: C::ScalarField::from(0 as u32),
+            a: C::ScalarField::from(0_u32),
+            b: C::ScalarField::from(0_u32),
             r: parameters.generator, // WIP
         }
     }
@@ -154,7 +146,8 @@ where
         let hm = poseidon_hash.hash(&[m])?;
         // let hm_fr = C::ScalarField::from_repr(hm.into_repr()).unwrap();
         let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm)?); // WIP TMP
-        let m_blinded = C::ScalarField::from(u.a.inverse().unwrap() * x_fr) * hm_fr;
+        let m_blinded = u.a.inverse().unwrap() * x_fr * hm_fr;
+        // let m_blinded = C::ScalarField::from(u.a.inverse().unwrap() * x_fr) * hm_fr;
 
         Ok((m_blinded, u))
     }
@@ -223,6 +216,7 @@ pub fn poseidon_setup_params<F: PrimeField>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_ed_on_bn254::EdwardsProjective;
     pub type Fq = ark_ed_on_bn254::Fq; // base field
                                        // pub type Fr = ark_ed_on_bn254::Fr; // scalar field
 

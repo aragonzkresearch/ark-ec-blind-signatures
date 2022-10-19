@@ -1,31 +1,28 @@
 use crate::{Parameters, PublicKey, Signature};
 
-use ark_ec::{AffineCurve, ProjectiveCurve};
+use ark_ec::ProjectiveCurve;
 use ark_ed_on_bn254::{constraints::EdwardsVar, EdwardsParameters, FqParameters};
-use ark_ff::{
-    fields::{Field, Fp256},
-    to_bytes, PrimeField, ToConstraintField,
-};
+use ark_ff::{fields::Fp256, to_bytes, PrimeField};
 use ark_r1cs_std::{
     alloc::{AllocVar, AllocationMode},
     bits::uint8::UInt8,
     boolean::Boolean,
     eq::EqGadget,
-    fields::{fp::FpVar, FieldVar},
-    groups::{curves::twisted_edwards::AffineVar, GroupOpsBounds},
+    fields::fp::FpVar,
+    groups::GroupOpsBounds,
     prelude::CurveVar,
     ToBitsGadget,
 };
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, Namespace, SynthesisError};
-use ark_std::ops::{Add, Mul};
+use ark_std::ops::Mul;
 
 use core::{borrow::Borrow, marker::PhantomData};
 use derivative::Derivative;
 
 // hash
 use arkworks_native_gadgets::poseidon as poseidon_native;
-use arkworks_r1cs_gadgets::poseidon;
-use arkworks_r1cs_gadgets::poseidon::{FieldHasherGadget, PoseidonGadget, PoseidonParametersVar};
+// use arkworks_r1cs_gadgets::poseidon;
+use arkworks_r1cs_gadgets::poseidon::{FieldHasherGadget, PoseidonGadget};
 
 use crate::ConstraintF;
 
@@ -95,12 +92,12 @@ where
             for i in 0..s_bytes.len() {
                 s.push(UInt8::<ConstraintF<C>>::new_variable(
                     cs.clone(),
-                    || Ok(s_bytes[i].clone()),
+                    || Ok(s_bytes[i]),
                     mode,
                 )?);
             }
 
-            let r = GC::new_variable(cs.clone(), || Ok(val.borrow().r), mode)?;
+            let r = GC::new_variable(cs, || Ok(val.borrow().r), mode)?;
 
             Ok(Self {
                 s,
@@ -133,7 +130,7 @@ where
     ) -> Result<Self, SynthesisError> {
         f().and_then(|val| {
             let cs = cs.into();
-            let generator = GC::new_variable(cs.clone(), || Ok(val.borrow().generator), mode)?;
+            let generator = GC::new_variable(cs, || Ok(val.borrow().generator), mode)?;
             Ok(Self {
                 generator,
                 _curve: PhantomData,
@@ -192,6 +189,70 @@ where
     }
 }
 
+// example of circuit using BlindSigVerifyGadget
+#[derive(Clone)]
+pub struct BlindSigVerifyCircuit<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
+where
+    <C as ProjectiveCurve>::BaseField: PrimeField,
+{
+    _group: PhantomData<*const GC>,
+    pub params: Parameters<C>,
+    pub poseidon_hash_native: poseidon_native::Poseidon<ConstraintF<C>>,
+    pub signature: Option<Signature<C>>,
+    pub pub_key: Option<PublicKey<C>>,
+    pub message: Option<ConstraintF<C>>,
+}
+
+impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>> ConstraintSynthesizer<ConstraintF<C>>
+    for BlindSigVerifyCircuit<C, GC>
+where
+    C: ProjectiveCurve,
+    GC: CurveVar<C, ConstraintF<C>>,
+    for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
+    ark_r1cs_std::groups::curves::twisted_edwards::AffineVar<
+        EdwardsParameters,
+        FpVar<Fp256<FqParameters>>,
+    >: From<GC>,
+    <C as ProjectiveCurve>::BaseField: PrimeField,
+    FpVar<<C as ProjectiveCurve>::BaseField>: Mul<FpVar<Fp256<FqParameters>>>,
+    FpVar<<C as ProjectiveCurve>::BaseField>: From<FpVar<Fp256<FqParameters>>>,
+{
+    #[tracing::instrument(target = "r1cs", skip(self, cs))]
+    fn generate_constraints(
+        self,
+        cs: ConstraintSystemRef<ConstraintF<C>>,
+    ) -> Result<(), SynthesisError> {
+        let parameters =
+            ParametersVar::new_constant(ark_relations::ns!(cs, "parameters"), &self.params)?;
+
+        let pub_key =
+            PublicKeyVar::<C, GC>::new_input(ark_relations::ns!(cs, "public key"), || {
+                self.pub_key.ok_or(SynthesisError::AssignmentMissing)
+            })?;
+        let m = FpVar::<ConstraintF<C>>::new_input(ark_relations::ns!(cs, "message"), || {
+            self.message.ok_or(SynthesisError::AssignmentMissing)
+        })?;
+        let signature =
+            SignatureVar::<C, GC>::new_witness(ark_relations::ns!(cs, "signature"), || {
+                self.signature.ok_or(SynthesisError::AssignmentMissing)
+            })?;
+        let poseidon_hash = PoseidonGadget::<ConstraintF<C>>::from_native(
+            &mut cs.clone(),
+            self.poseidon_hash_native,
+        )
+        .unwrap();
+
+        let v = BlindSigVerifyGadget::<C, GC>::verify(
+            &parameters,
+            &poseidon_hash,
+            m,
+            &signature,
+            &pub_key,
+        )?;
+        v.enforce_equal(&Boolean::TRUE)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -208,13 +269,15 @@ mod test {
     // type Fr = <BabyJubJub as ProjectiveCurve>::ScalarField;
     type S = BlindSigScheme<BabyJubJub>;
 
-    #[test]
-    fn test_verify() {
-        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
-        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+    fn generate_native_data(
+        poseidon_hash: &poseidon::Poseidon<Fq>,
+    ) -> (
+        Parameters<BabyJubJub>,
+        PublicKey<BabyJubJub>,
+        Fq,
+        Signature<BabyJubJub>,
+    ) {
         let mut rng = ark_std::test_rng();
-
-        // create signature using native-rust lib
         let params = S::setup();
         let (pk, sk) = S::keygen(&params, &mut rng);
         let (k, signer_r) = S::new_request_params(&params, &mut rng);
@@ -224,6 +287,16 @@ mod test {
         let s = S::unblind(s_blinded, u);
         let verified = S::verify(&params, &poseidon_hash, m, s.clone(), pk);
         assert!(verified);
+        (params, pk, m, s)
+    }
+
+    #[test]
+    fn test_verify() {
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
+        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+
+        // create signature using native-rust lib
+        let (params, pk, m, s) = generate_native_data(&poseidon_hash);
 
         // use the constraint system to verify the signature
         type SG = BlindSigVerifyGadget<BabyJubJub, BabyJubJubVar>;
@@ -249,5 +322,29 @@ mod test {
         .unwrap();
         valid_sig.enforce_equal(&Boolean::<Fq>::TRUE).unwrap();
         assert!(cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_constraint_system() {
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
+        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+
+        // create signature using native-rust lib
+        let (params, pk, m, s) = generate_native_data(&poseidon_hash);
+
+        // use the constraint system to verify the signature
+        let circuit = BlindSigVerifyCircuit::<BabyJubJub, BabyJubJubVar> {
+            params,
+            poseidon_hash_native: poseidon_hash,
+            signature: Some(s),
+            pub_key: Some(pk),
+            message: Some(m),
+            _group: PhantomData,
+        };
+        let cs = ConstraintSystem::<Fq>::new_ref();
+        circuit.generate_constraints(cs.clone()).unwrap();
+        let is_satisfied = cs.is_satisfied().unwrap();
+        assert!(is_satisfied);
+        println!("num_cnstraints={:?}", cs.num_constraints());
     }
 }
