@@ -34,7 +34,7 @@ pub struct Signature<C: ProjectiveCurve> {
     r: <C as ProjectiveCurve>::Affine,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct UserSecretData<C: ProjectiveCurve> {
     a: C::ScalarField,
     b: C::ScalarField,
@@ -153,7 +153,7 @@ where
         Ok((m_blinded, u))
     }
 
-    pub fn unblind(s_blinded: C::ScalarField, u: UserSecretData<C>) -> Signature<C> {
+    pub fn unblind(s_blinded: C::ScalarField, u: &UserSecretData<C>) -> Signature<C> {
         // s = a s' + b
         let s = u.a * s_blinded + u.b;
         Signature { s, r: u.r }
@@ -240,7 +240,7 @@ mod tests {
 
         let s_blinded = S::blind_sign(sk, k, m_blinded);
 
-        let s = S::unblind(s_blinded, u);
+        let s = S::unblind(s_blinded, &u);
 
         let verified = S::verify(&params, &poseidon_hash, &m, s, pk);
         assert!(verified);

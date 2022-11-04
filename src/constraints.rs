@@ -35,7 +35,7 @@ pub struct PublicKeyVar<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
 where
     for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
 {
-    pub_key: GC,
+    pub pub_key: GC,
     #[doc(hidden)]
     _group: PhantomData<*const C>,
 }
@@ -59,31 +59,43 @@ where
     }
 }
 
-// TODO parametrize Msg & MsgVar length
-
 #[derive(Clone, Default, Debug)]
-// pub struct Msg<C: ProjectiveCurve>(pub Vec<ConstraintF<C>>);
-pub struct Msg<C: ProjectiveCurve>(pub [ConstraintF<C>; 3]);
+pub struct Msg<const MSG_LEN: usize, C: ProjectiveCurve>(pub [ConstraintF<C>; 3]);
 
 #[derive(Derivative)]
 #[derivative(
     Debug(bound = "C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>"),
     Clone(bound = "C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>")
 )]
-pub struct MsgVar<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
+pub struct MsgVar<const MSG_LEN: usize, C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
 where
     for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
 {
-    m: [FpVar<ConstraintF<C>>; 3],
+    m: [FpVar<ConstraintF<C>>; MSG_LEN],
     _gc: PhantomData<GC>,
 }
-impl<C, GC> AllocVar<Msg<C>, ConstraintF<C>> for MsgVar<C, GC>
+impl<const MSG_LEN: usize, C, GC> MsgVar<MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
     for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
 {
-    fn new_variable<T: Borrow<Msg<C>>>(
+    pub fn new(m: [FpVar<ConstraintF<C>>; MSG_LEN]) -> Self {
+        Self {
+            m,
+            _gc: PhantomData,
+        }
+    }
+}
+
+impl<const MSG_LEN: usize, C, GC> AllocVar<Msg<MSG_LEN, C>, ConstraintF<C>>
+    for MsgVar<MSG_LEN, C, GC>
+where
+    C: ProjectiveCurve,
+    GC: CurveVar<C, ConstraintF<C>>,
+    for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
+{
+    fn new_variable<T: Borrow<Msg<MSG_LEN, C>>>(
         cs: impl Into<Namespace<ConstraintF<C>>>,
         f: impl FnOnce() -> Result<T, SynthesisError>,
         mode: AllocationMode,
@@ -91,9 +103,21 @@ where
         f().and_then(|m| {
             let m = m.borrow();
             let cs = cs.into();
-            let msg: Vec<FpVar<ConstraintF<C>>> = Vec::new_variable(cs, || Ok(m.clone().0), mode)?;
+            let msg_vec: Vec<FpVar<ConstraintF<C>>> =
+                Vec::new_variable(cs, || Ok(m.clone().0), mode)?;
+            let m: [FpVar<ConstraintF<C>>; MSG_LEN] =
+                msg_vec
+                    .try_into()
+                    .unwrap_or_else(|v: Vec<FpVar<ConstraintF<C>>>| {
+                        // WIP
+                        panic!(
+                            "Expected Vec of length: {}, actual length: {}",
+                            MSG_LEN,
+                            v.len()
+                        )
+                    });
             Ok(Self {
-                m: [msg[0].clone(), msg[1].clone(), msg[2].clone()],
+                m,
                 _gc: PhantomData,
             })
         })
@@ -181,15 +205,19 @@ where
     }
 }
 
-pub struct BlindSigVerifyGadget<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
-where
+pub struct BlindSigVerifyGadget<
+    const MSG_LEN: usize,
+    C: ProjectiveCurve,
+    GC: CurveVar<C, ConstraintF<C>>,
+> where
     for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
 {
     _params: Parameters<C>, // TODO review if needed, maybe delete
     _gc: PhantomData<GC>,
 }
 
-impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>> BlindSigVerifyGadget<C, GC>
+impl<const MSG_LEN: usize, C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
+    BlindSigVerifyGadget<MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -202,10 +230,10 @@ where
     FpVar<<C as ProjectiveCurve>::BaseField>: Mul<FpVar<Fp256<FqParameters>>>,
     FpVar<<C as ProjectiveCurve>::BaseField>: From<FpVar<Fp256<FqParameters>>>,
 {
-    fn verify(
+    pub fn verify(
         parameters: &ParametersVar<C, GC>,
         poseidon_hash: &PoseidonGadget<ConstraintF<C>>,
-        m: &MsgVar<C, GC>,
+        m: &MsgVar<MSG_LEN, C, GC>,
         s: &SignatureVar<C, GC>,
         q: &PublicKeyVar<C, GC>,
     ) -> Result<Boolean<ConstraintF<C>>, SynthesisError> {
@@ -230,9 +258,10 @@ where
 }
 
 pub struct BlindSigBatchVerifyGadget<
+    const NUM_SIGS: usize,
+    const MSG_LEN: usize,
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
-    const NUM_SIGS: usize,
 > where
     for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
 {
@@ -240,8 +269,12 @@ pub struct BlindSigBatchVerifyGadget<
     _gc: PhantomData<GC>,
 }
 
-impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>, const NUM_SIGS: usize>
-    BlindSigBatchVerifyGadget<C, GC, NUM_SIGS>
+impl<
+        const NUM_SIGS: usize,
+        const MSG_LEN: usize,
+        C: ProjectiveCurve,
+        GC: CurveVar<C, ConstraintF<C>>,
+    > BlindSigBatchVerifyGadget<NUM_SIGS, MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -254,10 +287,10 @@ where
     FpVar<<C as ProjectiveCurve>::BaseField>: Mul<FpVar<Fp256<FqParameters>>>,
     FpVar<<C as ProjectiveCurve>::BaseField>: From<FpVar<Fp256<FqParameters>>>,
 {
-    fn batch_verify(
+    pub fn batch_verify(
         parameters: &ParametersVar<C, GC>,
         poseidon_hash: &PoseidonGadget<ConstraintF<C>>,
-        m: &MsgVar<C, GC>,
+        m: &MsgVar<MSG_LEN, C, GC>,
         sigs: &[SignatureVar<C, GC>],
         q: &PublicKeyVar<C, GC>,
     ) -> Result<Boolean<ConstraintF<C>>, SynthesisError> {
@@ -287,8 +320,11 @@ where
 
 // example of circuit using BlindSigVerifyGadget to verify a single blind signature
 #[derive(Clone)]
-pub struct BlindSigVerifyCircuit<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
-where
+pub struct BlindSigVerifyCircuit<
+    const MSG_LEN: usize,
+    C: ProjectiveCurve,
+    GC: CurveVar<C, ConstraintF<C>>,
+> where
     <C as ProjectiveCurve>::BaseField: PrimeField,
 {
     _group: PhantomData<*const GC>,
@@ -296,11 +332,11 @@ where
     pub poseidon_hash_native: poseidon_native::Poseidon<ConstraintF<C>>,
     pub signature: Option<Signature<C>>,
     pub pub_key: Option<PublicKey<C>>,
-    pub message: Option<Msg<C>>,
+    pub message: Option<Msg<MSG_LEN, C>>,
 }
 
-impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>> ConstraintSynthesizer<ConstraintF<C>>
-    for BlindSigVerifyCircuit<C, GC>
+impl<const MSG_LEN: usize, C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
+    ConstraintSynthesizer<ConstraintF<C>> for BlindSigVerifyCircuit<MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -325,7 +361,7 @@ where
             PublicKeyVar::<C, GC>::new_input(ark_relations::ns!(cs, "public key"), || {
                 self.pub_key.ok_or(SynthesisError::AssignmentMissing)
             })?;
-        let m = MsgVar::<C, GC>::new_input(ark_relations::ns!(cs, "message"), || {
+        let m = MsgVar::<MSG_LEN, C, GC>::new_input(ark_relations::ns!(cs, "message"), || {
             self.message.ok_or(SynthesisError::AssignmentMissing)
         })?;
         let signature =
@@ -339,7 +375,7 @@ where
         )
         .unwrap();
 
-        let v = BlindSigVerifyGadget::<C, GC>::verify(
+        let v = BlindSigVerifyGadget::<MSG_LEN, C, GC>::verify(
             &parameters,
             &poseidon_hash,
             &m,
@@ -353,9 +389,10 @@ where
 // example of circuit using BlindSigVerifyGadget to verify a batch of blind signatures
 #[derive(Clone)]
 pub struct BlindSigBatchVerifyCircuit<
+    const NUM_SIGS: usize,
+    const MSG_LEN: usize,
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
-    const NUM_SIGS: usize,
 > where
     <C as ProjectiveCurve>::BaseField: PrimeField,
 {
@@ -364,11 +401,15 @@ pub struct BlindSigBatchVerifyCircuit<
     pub poseidon_hash_native: poseidon_native::Poseidon<ConstraintF<C>>,
     pub signatures: Option<Vec<Signature<C>>>,
     pub pub_key: Option<PublicKey<C>>,
-    pub message: Option<Msg<C>>,
+    pub message: Option<Msg<MSG_LEN, C>>,
 }
 
-impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>, const NUM_SIGS: usize>
-    ConstraintSynthesizer<ConstraintF<C>> for BlindSigBatchVerifyCircuit<C, GC, NUM_SIGS>
+impl<
+        const NUM_SIGS: usize,
+        const MSG_LEN: usize,
+        C: ProjectiveCurve,
+        GC: CurveVar<C, ConstraintF<C>>,
+    > ConstraintSynthesizer<ConstraintF<C>> for BlindSigBatchVerifyCircuit<NUM_SIGS, MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -393,7 +434,7 @@ where
             PublicKeyVar::<C, GC>::new_input(ark_relations::ns!(cs, "public key"), || {
                 self.pub_key.ok_or(SynthesisError::AssignmentMissing)
             })?;
-        let m = MsgVar::<C, GC>::new_input(ark_relations::ns!(cs, "message"), || {
+        let m = MsgVar::<MSG_LEN, C, GC>::new_input(ark_relations::ns!(cs, "message"), || {
             self.message.ok_or(SynthesisError::AssignmentMissing)
         })?;
 
@@ -415,7 +456,7 @@ where
         )
         .unwrap();
 
-        let v = BlindSigBatchVerifyGadget::<C, GC, NUM_SIGS>::batch_verify(
+        let v = BlindSigBatchVerifyGadget::<NUM_SIGS, MSG_LEN, C, GC>::batch_verify(
             &parameters,
             &poseidon_hash,
             &m,
@@ -447,7 +488,7 @@ mod test {
     ) -> (
         Parameters<BabyJubJub>,
         PublicKey<BabyJubJub>,
-        Msg<BabyJubJub>,
+        Msg<3, BabyJubJub>,
         Signature<BabyJubJub>,
     ) {
         let mut rng = ark_std::test_rng();
@@ -457,7 +498,7 @@ mod test {
         let m = [Fq::from(1234), Fq::from(5689), Fq::from(3456)];
         let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, &m, signer_r).unwrap();
         let s_blinded = S::blind_sign(sk, k, m_blinded);
-        let s = S::unblind(s_blinded, u);
+        let s = S::unblind(s_blinded, &u);
         let verified = S::verify(&params, &poseidon_hash, &m, s.clone(), pk);
         assert!(verified);
         (params, pk, Msg(m), s)
@@ -469,7 +510,7 @@ mod test {
     ) -> (
         Parameters<BabyJubJub>,
         PublicKey<BabyJubJub>,
-        Msg<BabyJubJub>,
+        Msg<3, BabyJubJub>,
         Vec<Signature<BabyJubJub>>,
     ) {
         let mut rng = ark_std::test_rng();
@@ -481,7 +522,7 @@ mod test {
             let (k, signer_r) = S::new_request_params(&params, &mut rng);
             let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, &m, signer_r).unwrap();
             let s_blinded = S::blind_sign(sk, k, m_blinded);
-            let s = S::unblind(s_blinded, u);
+            let s = S::unblind(s_blinded, &u);
             let verified = S::verify(&params, &poseidon_hash, &m, s.clone(), pk);
             assert!(verified);
             signatures.push(s);
@@ -491,15 +532,15 @@ mod test {
 
     #[test]
     fn test_single_verify() {
-        // TODO N_INPUTS+1 (N_INPUTS msg_to_sign_length)
         let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+        const MSG_LEN: usize = 3;
 
         // create signature using native-rust lib
         let (params, pk, m, s) = generate_single_sig_native_data(&poseidon_hash);
 
         // use the constraint system to verify the signature
-        type SG = BlindSigVerifyGadget<BabyJubJub, BabyJubJubVar>;
+        type SG = BlindSigVerifyGadget<MSG_LEN, BabyJubJub, BabyJubJubVar>;
         let cs = ConstraintSystem::<Fq>::new_ref();
 
         let params_var =
@@ -508,7 +549,8 @@ mod test {
             SignatureVar::<BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(&s)).unwrap();
         let pk_var =
             PublicKeyVar::<BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(&pk)).unwrap();
-        let m_var = MsgVar::<BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(m)).unwrap();
+        let m_var = MsgVar::<MSG_LEN, BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(m))
+            .unwrap();
         let poseidon_hash_var =
             PoseidonGadget::<Fq>::from_native(&mut cs.clone(), poseidon_hash).unwrap();
 
@@ -528,12 +570,13 @@ mod test {
     fn test_single_verify_constraint_system() {
         let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+        const MSG_LEN: usize = 3;
 
         // create signature using native-rust lib
         let (params, pk, m, s) = generate_single_sig_native_data(&poseidon_hash);
 
         // use the constraint system to verify the signature
-        let circuit = BlindSigVerifyCircuit::<BabyJubJub, BabyJubJubVar> {
+        let circuit = BlindSigVerifyCircuit::<MSG_LEN, BabyJubJub, BabyJubJubVar> {
             params,
             poseidon_hash_native: poseidon_hash.clone(),
             signature: Some(s),
@@ -552,13 +595,14 @@ mod test {
     fn test_batch_verify_constraint_system() {
         let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+        const MSG_LEN: usize = 3;
 
         // create signatures using native-rust lib
         const NUM_SIGS: usize = 5;
         let (params, pk, m, sigs) = generate_batch_sig_native_data(&poseidon_hash, NUM_SIGS);
 
         // use the constraint system to verify the batch of signatures
-        let circuit = BlindSigBatchVerifyCircuit::<BabyJubJub, BabyJubJubVar, NUM_SIGS> {
+        let circuit = BlindSigBatchVerifyCircuit::<NUM_SIGS, MSG_LEN, BabyJubJub, BabyJubJubVar> {
             params,
             poseidon_hash_native: poseidon_hash.clone(),
             signatures: Some(sigs),
