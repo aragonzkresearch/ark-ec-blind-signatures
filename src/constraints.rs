@@ -59,6 +59,47 @@ where
     }
 }
 
+// TODO parametrize Msg & MsgVar length
+
+#[derive(Clone, Default, Debug)]
+// pub struct Msg<C: ProjectiveCurve>(pub Vec<ConstraintF<C>>);
+pub struct Msg<C: ProjectiveCurve>(pub [ConstraintF<C>; 3]);
+
+#[derive(Derivative)]
+#[derivative(
+    Debug(bound = "C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>"),
+    Clone(bound = "C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>")
+)]
+pub struct MsgVar<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
+where
+    for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
+{
+    m: [FpVar<ConstraintF<C>>; 3],
+    _gc: PhantomData<GC>,
+}
+impl<C, GC> AllocVar<Msg<C>, ConstraintF<C>> for MsgVar<C, GC>
+where
+    C: ProjectiveCurve,
+    GC: CurveVar<C, ConstraintF<C>>,
+    for<'a> &'a GC: GroupOpsBounds<'a, C, GC>,
+{
+    fn new_variable<T: Borrow<Msg<C>>>(
+        cs: impl Into<Namespace<ConstraintF<C>>>,
+        f: impl FnOnce() -> Result<T, SynthesisError>,
+        mode: AllocationMode,
+    ) -> Result<Self, SynthesisError> {
+        f().and_then(|m| {
+            let m = m.borrow();
+            let cs = cs.into();
+            let msg: Vec<FpVar<ConstraintF<C>>> = Vec::new_variable(cs, || Ok(m.clone().0), mode)?;
+            Ok(Self {
+                m: [msg[0].clone(), msg[1].clone(), msg[2].clone()],
+                _gc: PhantomData,
+            })
+        })
+    }
+}
+
 #[derive(Derivative)]
 #[derivative(
     Debug(bound = "C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>"),
@@ -164,7 +205,7 @@ where
     fn verify(
         parameters: &ParametersVar<C, GC>,
         poseidon_hash: &PoseidonGadget<ConstraintF<C>>,
-        m: FpVar<ConstraintF<C>>,
+        m: &MsgVar<C, GC>,
         s: &SignatureVar<C, GC>,
         q: &PublicKeyVar<C, GC>,
     ) -> Result<Boolean<ConstraintF<C>>, SynthesisError> {
@@ -175,7 +216,7 @@ where
         // Note: in a circuit that aggregates multiple verifications, the hashing step could be
         // done outside the signature verification, once for all 1 votes and once for all 0 votes,
         // saving lots of constraints
-        let hm = poseidon_hash.hash(&[m])?;
+        let hm = poseidon_hash.hash(&m.m)?;
         let r = EdwardsVar::from(s.r.clone()); // WIP
         let rx_fpvar: FpVar<ConstraintF<C>> = r.x.into();
 
@@ -216,14 +257,14 @@ where
     fn batch_verify(
         parameters: &ParametersVar<C, GC>,
         poseidon_hash: &PoseidonGadget<ConstraintF<C>>,
-        m: FpVar<ConstraintF<C>>,
+        m: &MsgVar<C, GC>,
         sigs: &[SignatureVar<C, GC>],
         q: &PublicKeyVar<C, GC>,
     ) -> Result<Boolean<ConstraintF<C>>, SynthesisError> {
         // Note: in a circuit that aggregates multiple verifications, the hashing step could be
         // done outside the signature verification, once for all 1 votes and once for all 0 votes,
         // saving lots of constraints
-        let hm = poseidon_hash.hash(&[m])?;
+        let hm = poseidon_hash.hash(&m.m)?;
 
         #[allow(clippy::needless_range_loop)]
         for i in 0..NUM_SIGS {
@@ -255,7 +296,7 @@ where
     pub poseidon_hash_native: poseidon_native::Poseidon<ConstraintF<C>>,
     pub signature: Option<Signature<C>>,
     pub pub_key: Option<PublicKey<C>>,
-    pub message: Option<ConstraintF<C>>,
+    pub message: Option<Msg<C>>,
 }
 
 impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>> ConstraintSynthesizer<ConstraintF<C>>
@@ -284,7 +325,7 @@ where
             PublicKeyVar::<C, GC>::new_input(ark_relations::ns!(cs, "public key"), || {
                 self.pub_key.ok_or(SynthesisError::AssignmentMissing)
             })?;
-        let m = FpVar::<ConstraintF<C>>::new_input(ark_relations::ns!(cs, "message"), || {
+        let m = MsgVar::<C, GC>::new_input(ark_relations::ns!(cs, "message"), || {
             self.message.ok_or(SynthesisError::AssignmentMissing)
         })?;
         let signature =
@@ -301,7 +342,7 @@ where
         let v = BlindSigVerifyGadget::<C, GC>::verify(
             &parameters,
             &poseidon_hash,
-            m,
+            &m,
             &signature,
             &pub_key,
         )?;
@@ -323,7 +364,7 @@ pub struct BlindSigBatchVerifyCircuit<
     pub poseidon_hash_native: poseidon_native::Poseidon<ConstraintF<C>>,
     pub signatures: Option<Vec<Signature<C>>>,
     pub pub_key: Option<PublicKey<C>>,
-    pub message: Option<ConstraintF<C>>,
+    pub message: Option<Msg<C>>,
 }
 
 impl<C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>, const NUM_SIGS: usize>
@@ -352,7 +393,7 @@ where
             PublicKeyVar::<C, GC>::new_input(ark_relations::ns!(cs, "public key"), || {
                 self.pub_key.ok_or(SynthesisError::AssignmentMissing)
             })?;
-        let m = FpVar::<ConstraintF<C>>::new_input(ark_relations::ns!(cs, "message"), || {
+        let m = MsgVar::<C, GC>::new_input(ark_relations::ns!(cs, "message"), || {
             self.message.ok_or(SynthesisError::AssignmentMissing)
         })?;
 
@@ -377,7 +418,7 @@ where
         let v = BlindSigBatchVerifyGadget::<C, GC, NUM_SIGS>::batch_verify(
             &parameters,
             &poseidon_hash,
-            m,
+            &m,
             &signatures,
             &pub_key,
         )?;
@@ -406,20 +447,20 @@ mod test {
     ) -> (
         Parameters<BabyJubJub>,
         PublicKey<BabyJubJub>,
-        Fq,
+        Msg<BabyJubJub>,
         Signature<BabyJubJub>,
     ) {
         let mut rng = ark_std::test_rng();
         let params = S::setup();
         let (pk, sk) = S::keygen(&params, &mut rng);
         let (k, signer_r) = S::new_request_params(&params, &mut rng);
-        let m = Fq::from(1234);
-        let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, m, signer_r).unwrap();
+        let m = [Fq::from(1234), Fq::from(5689), Fq::from(3456)];
+        let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, &m, signer_r).unwrap();
         let s_blinded = S::blind_sign(sk, k, m_blinded);
         let s = S::unblind(s_blinded, u);
-        let verified = S::verify(&params, &poseidon_hash, m, s.clone(), pk);
+        let verified = S::verify(&params, &poseidon_hash, &m, s.clone(), pk);
         assert!(verified);
-        (params, pk, m, s)
+        (params, pk, Msg(m), s)
     }
 
     fn generate_batch_sig_native_data(
@@ -428,29 +469,30 @@ mod test {
     ) -> (
         Parameters<BabyJubJub>,
         PublicKey<BabyJubJub>,
-        Fq,
+        Msg<BabyJubJub>,
         Vec<Signature<BabyJubJub>>,
     ) {
         let mut rng = ark_std::test_rng();
         let params = S::setup();
         let (pk, sk) = S::keygen(&params, &mut rng);
-        let m = Fq::from(1234);
+        let m = [Fq::from(1234), Fq::from(5689), Fq::from(3456)];
         let mut signatures: Vec<Signature<BabyJubJub>> = Vec::new();
         for _ in 0..n {
             let (k, signer_r) = S::new_request_params(&params, &mut rng);
-            let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, m, signer_r).unwrap();
+            let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, &m, signer_r).unwrap();
             let s_blinded = S::blind_sign(sk, k, m_blinded);
             let s = S::unblind(s_blinded, u);
-            let verified = S::verify(&params, &poseidon_hash, m, s.clone(), pk);
+            let verified = S::verify(&params, &poseidon_hash, &m, s.clone(), pk);
             assert!(verified);
             signatures.push(s);
         }
-        (params, pk, m, signatures)
+        (params, pk, Msg(m), signatures)
     }
 
     #[test]
     fn test_single_verify() {
-        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
+        // TODO N_INPUTS+1 (N_INPUTS msg_to_sign_length)
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
 
         // create signature using native-rust lib
@@ -466,14 +508,14 @@ mod test {
             SignatureVar::<BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(&s)).unwrap();
         let pk_var =
             PublicKeyVar::<BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(&pk)).unwrap();
-        let m_var = FpVar::<Fq>::new_witness(cs.clone(), || Ok(&m)).unwrap();
+        let m_var = MsgVar::<BabyJubJub, BabyJubJubVar>::new_witness(cs.clone(), || Ok(m)).unwrap();
         let poseidon_hash_var =
             PoseidonGadget::<Fq>::from_native(&mut cs.clone(), poseidon_hash).unwrap();
 
         let valid_sig = SG::verify(
             &params_var,
             &poseidon_hash_var,
-            m_var,
+            &m_var,
             &signature_var,
             &pk_var,
         )
@@ -484,7 +526,7 @@ mod test {
 
     #[test]
     fn test_single_verify_constraint_system() {
-        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
 
         // create signature using native-rust lib
@@ -493,7 +535,7 @@ mod test {
         // use the constraint system to verify the signature
         let circuit = BlindSigVerifyCircuit::<BabyJubJub, BabyJubJubVar> {
             params,
-            poseidon_hash_native: poseidon_hash,
+            poseidon_hash_native: poseidon_hash.clone(),
             signature: Some(s),
             pub_key: Some(pk),
             message: Some(m),
@@ -508,7 +550,7 @@ mod test {
 
     #[test]
     fn test_batch_verify_constraint_system() {
-        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
 
         // create signatures using native-rust lib
@@ -518,7 +560,7 @@ mod test {
         // use the constraint system to verify the batch of signatures
         let circuit = BlindSigBatchVerifyCircuit::<BabyJubJub, BabyJubJubVar, NUM_SIGS> {
             params,
-            poseidon_hash_native: poseidon_hash,
+            poseidon_hash_native: poseidon_hash.clone(),
             signatures: Some(sigs),
             pub_key: Some(pk),
             message: Some(m),

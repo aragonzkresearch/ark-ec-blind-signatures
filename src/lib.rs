@@ -129,7 +129,7 @@ where
         parameters: &Parameters<C>,
         rng: &mut R,
         poseidon_hash: &poseidon::Poseidon<ConstraintF<C>>,
-        m: ConstraintF<C>,
+        m: &[ConstraintF<C>],
         signer_r: C::Affine,
     ) -> Result<(C::ScalarField, UserSecretData<C>), ark_crypto_primitives::Error>
     where
@@ -144,7 +144,7 @@ where
 
         // m' = a^-1 rx h(m)
         // TODO hash(m) must be \in Fr
-        let hm = poseidon_hash.hash(&[m])?;
+        let hm = poseidon_hash.hash(m)?;
         // let hm_fr = C::ScalarField::from_repr(hm.into_repr()).unwrap();
         let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm)?); // WIP TMP
         let m_blinded = u.a.inverse().unwrap() * x_fr * hm_fr;
@@ -162,7 +162,7 @@ where
     pub fn verify(
         parameters: &Parameters<C>,
         poseidon_hash: &poseidon::Poseidon<ConstraintF<C>>,
-        m: ConstraintF<C>,
+        m: &[ConstraintF<C>],
         s: Signature<C>,
         q: PublicKey<C>,
     ) -> bool
@@ -172,7 +172,7 @@ where
         let sG = parameters.generator.mul(s.s.into_repr());
 
         // TODO the output of hash(m) must be \in Fr
-        let hm = poseidon_hash.hash(&[m]).unwrap();
+        let hm = poseidon_hash.hash(m).unwrap();
         // let hm_fr = C::ScalarField::from_repr(hm.into_repr()).unwrap();
         let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm).unwrap()); // WIP TMP
 
@@ -225,7 +225,7 @@ mod tests {
     fn test_blind_signature_flow_native() {
         type S = BlindSigScheme<EdwardsProjective>;
 
-        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 3);
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
         let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
 
         let mut rng = ark_std::test_rng();
@@ -234,15 +234,15 @@ mod tests {
         let (pk, sk) = S::keygen(&params, &mut rng);
 
         let (k, signer_r) = S::new_request_params(&params, &mut rng);
-        let m = Fq::from(1234);
+        let m = [Fq::from(1234), Fq::from(5689), Fq::from(3456)];
 
-        let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, m, signer_r).unwrap();
+        let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, &m, signer_r).unwrap();
 
         let s_blinded = S::blind_sign(sk, k, m_blinded);
 
         let s = S::unblind(s_blinded, u);
 
-        let verified = S::verify(&params, &poseidon_hash, m, s, pk);
+        let verified = S::verify(&params, &poseidon_hash, &m, s, pk);
         assert!(verified);
     }
 }
