@@ -59,8 +59,8 @@ where
     }
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct Msg<const MSG_LEN: usize, C: ProjectiveCurve>(pub [ConstraintF<C>; 3]);
+#[derive(Clone, Debug)]
+pub struct Msg<const MSG_LEN: usize, C: ProjectiveCurve>(pub [ConstraintF<C>; MSG_LEN]);
 
 #[derive(Derivative)]
 #[derivative(
@@ -588,7 +588,7 @@ mod test {
         circuit.generate_constraints(cs.clone()).unwrap();
         let is_satisfied = cs.is_satisfied().unwrap();
         assert!(is_satisfied);
-        println!("num_cnstraints={:?}", cs.num_constraints());
+        println!("num_constraints={:?}", cs.num_constraints());
     }
 
     #[test]
@@ -614,6 +614,6 @@ mod test {
         circuit.generate_constraints(cs.clone()).unwrap();
         let is_satisfied = cs.is_satisfied().unwrap();
         assert!(is_satisfied);
-        println!("num_cnstraints={:?}", cs.num_constraints());
+        println!("num_constraints={:?}", cs.num_constraints());
     }
 }

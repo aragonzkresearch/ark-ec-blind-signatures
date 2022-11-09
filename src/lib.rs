@@ -94,6 +94,52 @@ where
         sk * m_blinded + k
     }
 
+    // new_k_and_R returns a new k \in Fr, and R=k * G, such that R.x \in Fr
+    fn new_k_and_R<R: Rng>(parameters: &Parameters<C>, rng: &mut R) -> (C::ScalarField, C::Affine)
+    where
+        <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
+    {
+        let k = C::ScalarField::rand(rng);
+
+        let R: C::Affine = parameters.generator.mul(k.into_repr()).into();
+        let r = EdwardsAffine::from(R); // WIP
+
+        let one = BigInteger256::from(1u64);
+        let x_repr = r.x.into_repr();
+        let modulus = <<C::ScalarField as PrimeField>::Params as FpParameters>::MODULUS;
+        let modulus_repr = BigInteger256::try_from(modulus.into()).unwrap();
+
+        if !(x_repr >= one && x_repr < modulus_repr) {
+            // TODO maybe add a counter of attempts with a limit
+            return Self::new_k_and_R(parameters, rng);
+        }
+
+        (k, R)
+    }
+
+    // non_blind_sign performs a non-blind signature, which can be verified with the same check
+    // than a blind-signature
+    pub fn non_blind_sign<R: Rng>(
+        parameters: &Parameters<C>,
+        rng: &mut R,
+        poseidon_hash: &poseidon::Poseidon<ConstraintF<C>>,
+        sk: SecretKey<C>,
+        m: &[ConstraintF<C>],
+    ) -> Result<Signature<C>, ark_crypto_primitives::Error>
+    where
+        <C as ProjectiveCurve>::ScalarField: From<BigInteger256>,
+    {
+        let (k, R) = Self::new_k_and_R(parameters, rng);
+        let r = EdwardsAffine::from(R); // WIP
+        let x_fr = C::ScalarField::from(r.x.into_repr());
+
+        let hm = poseidon_hash.hash(m)?;
+        let hm_fr = C::ScalarField::from_le_bytes_mod_order(&to_bytes!(hm)?); // WIP TMP
+
+        let s = k + (x_fr * hm_fr) * sk;
+        Ok(Signature { s, r: R })
+    }
+
     // requester
     pub fn new_blind_params<R: Rng>(
         parameters: &Parameters<C>,
@@ -242,6 +288,26 @@ mod tests {
 
         let s = S::unblind(s_blinded, &u);
 
+        let verified = S::verify(&params, &poseidon_hash, &m, s, pk);
+        assert!(verified);
+    }
+
+    #[test]
+    fn test_non_blind_signature() {
+        type S = BlindSigScheme<EdwardsProjective>;
+
+        let poseidon_params = poseidon_setup_params::<Fq>(Curve::Bn254, 5, 4);
+        let poseidon_hash = poseidon::Poseidon::new(poseidon_params);
+
+        let mut rng = ark_std::test_rng();
+
+        let params = S::setup();
+        let (pk, sk) = S::keygen(&params, &mut rng);
+
+        let m = [Fq::from(1234), Fq::from(5689), Fq::from(3456)];
+        let s = S::non_blind_sign(&params, &mut rng, &poseidon_hash, sk, &m).unwrap();
+
+        // verify using the same verification method used for blind-signatures
         let verified = S::verify(&params, &poseidon_hash, &m, s, pk);
         assert!(verified);
     }
