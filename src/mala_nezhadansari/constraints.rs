@@ -1,4 +1,4 @@
-use crate::{Parameters, PublicKey, Signature};
+use crate::mala_nezhadansari::{ConstraintF, Parameters, PublicKey, Signature};
 
 use ark_ec::ProjectiveCurve;
 use ark_ed_on_bn254::{constraints::EdwardsVar, EdwardsParameters, FqParameters};
@@ -23,8 +23,6 @@ use derivative::Derivative;
 use arkworks_native_gadgets::poseidon as poseidon_native;
 // use arkworks_r1cs_gadgets::poseidon;
 use arkworks_r1cs_gadgets::poseidon::{FieldHasherGadget, PoseidonGadget};
-
-use crate::ConstraintF;
 
 #[derive(Derivative)]
 #[derivative(
@@ -470,7 +468,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{poseidon_setup_params, BlindSigScheme};
+    use crate::mala_nezhadansari::{poseidon_setup_params, BlindSigScheme};
     use ark_ed_on_bn254::constraints::EdwardsVar as BabyJubJubVar;
     use ark_ed_on_bn254::EdwardsProjective as BabyJubJub;
 
