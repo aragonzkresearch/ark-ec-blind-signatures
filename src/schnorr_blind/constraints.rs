@@ -1,4 +1,5 @@
-use crate::schnorr_blind::{ConstraintF, Parameters, PublicKey, Signature};
+use crate::schnorr_blind::{ConstraintF, Msg, Parameters, PublicKey, Signature};
+use crate::{constraints::BlindSigVerifyGadget, BlindSignatureScheme};
 
 use ark_ec::ProjectiveCurve;
 use ark_ed_on_bn254::{constraints::EdwardsVar, EdwardsParameters, FqParameters};
@@ -21,7 +22,6 @@ use derivative::Derivative;
 
 // hash
 use arkworks_native_gadgets::poseidon as poseidon_native;
-// use arkworks_r1cs_gadgets::poseidon;
 use arkworks_r1cs_gadgets::poseidon::{FieldHasherGadget, PoseidonGadget};
 
 #[derive(Derivative)]
@@ -56,9 +56,6 @@ where
         })
     }
 }
-
-#[derive(Clone, Debug)]
-pub struct Msg<const MSG_LEN: usize, C: ProjectiveCurve>(pub [ConstraintF<C>; MSG_LEN]);
 
 #[derive(Derivative)]
 #[derivative(
@@ -203,7 +200,7 @@ where
     }
 }
 
-pub struct BlindSigVerifyGadget<
+pub struct BlindSchnorrVerifyGadget<
     const MSG_LEN: usize,
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -214,8 +211,12 @@ pub struct BlindSigVerifyGadget<
     _gc: PhantomData<GC>,
 }
 
-impl<const MSG_LEN: usize, C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
-    BlindSigVerifyGadget<MSG_LEN, C, GC>
+impl<
+        S: BlindSignatureScheme,
+        const MSG_LEN: usize,
+        C: ProjectiveCurve,
+        GC: CurveVar<C, ConstraintF<C>>,
+    > BlindSigVerifyGadget<S, ConstraintF<C>> for BlindSchnorrVerifyGadget<MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -227,8 +228,21 @@ where
     <C as ProjectiveCurve>::BaseField: PrimeField,
     FpVar<<C as ProjectiveCurve>::BaseField>: Mul<FpVar<Fp256<FqParameters>>>,
     FpVar<<C as ProjectiveCurve>::BaseField>: From<FpVar<Fp256<FqParameters>>>,
+
+    ParametersVar<C, GC>:
+        AllocVar<<S as BlindSignatureScheme>::Parameters, <C as ProjectiveCurve>::BaseField>,
+    PublicKeyVar<C, GC>:
+        AllocVar<<S as BlindSignatureScheme>::PublicKey, <C as ProjectiveCurve>::BaseField>,
+    SignatureVar<C, GC>:
+        AllocVar<<S as BlindSignatureScheme>::Signature, <C as ProjectiveCurve>::BaseField>,
 {
-    pub fn verify(
+    type ParametersVar = ParametersVar<C, GC>;
+    type PublicKeyVar = PublicKeyVar<C, GC>;
+    type SignatureVar = SignatureVar<C, GC>;
+    type Msg = Msg<MSG_LEN, C>;
+    type MsgVar = MsgVar<MSG_LEN, C, GC>;
+
+    fn verify(
         parameters: &ParametersVar<C, GC>,
         poseidon_hash: &PoseidonGadget<ConstraintF<C>>,
         m: &MsgVar<MSG_LEN, C, GC>,
@@ -257,12 +271,14 @@ where
 // example of circuit using BlindSigVerifyGadget to verify a single blind signature
 #[derive(Clone)]
 pub struct BlindSigVerifyCircuit<
+    S: BlindSignatureScheme,
     const MSG_LEN: usize,
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
 > where
     <C as ProjectiveCurve>::BaseField: PrimeField,
 {
+    _s: PhantomData<S>,
     _group: PhantomData<*const GC>,
     pub params: Parameters<C>,
     pub poseidon_hash_native: poseidon_native::Poseidon<ConstraintF<C>>,
@@ -271,8 +287,12 @@ pub struct BlindSigVerifyCircuit<
     pub message: Option<Msg<MSG_LEN, C>>,
 }
 
-impl<const MSG_LEN: usize, C: ProjectiveCurve, GC: CurveVar<C, ConstraintF<C>>>
-    ConstraintSynthesizer<ConstraintF<C>> for BlindSigVerifyCircuit<MSG_LEN, C, GC>
+impl<
+        S: BlindSignatureScheme,
+        const MSG_LEN: usize,
+        C: ProjectiveCurve,
+        GC: CurveVar<C, ConstraintF<C>>,
+    > ConstraintSynthesizer<ConstraintF<C>> for BlindSigVerifyCircuit<S, MSG_LEN, C, GC>
 where
     C: ProjectiveCurve,
     GC: CurveVar<C, ConstraintF<C>>,
@@ -284,6 +304,17 @@ where
     <C as ProjectiveCurve>::BaseField: PrimeField,
     FpVar<<C as ProjectiveCurve>::BaseField>: Mul<FpVar<Fp256<FqParameters>>>,
     FpVar<<C as ProjectiveCurve>::BaseField>: From<FpVar<Fp256<FqParameters>>>,
+
+    ParametersVar<C, GC>:
+        AllocVar<<S as BlindSignatureScheme>::Parameters, <C as ProjectiveCurve>::BaseField>,
+    PublicKeyVar<C, GC>:
+        AllocVar<<S as BlindSignatureScheme>::PublicKey, <C as ProjectiveCurve>::BaseField>,
+    SignatureVar<C, GC>:
+        AllocVar<<S as BlindSignatureScheme>::Signature, <C as ProjectiveCurve>::BaseField>,
+
+    Parameters<C>: Borrow<<S as BlindSignatureScheme>::Parameters>,
+    PublicKey<C>: Borrow<<S as BlindSignatureScheme>::PublicKey>,
+    Signature<C>: Borrow<<S as BlindSignatureScheme>::Signature>,
 {
     #[tracing::instrument(target = "r1cs", skip(self, cs))]
     fn generate_constraints(
@@ -291,7 +322,7 @@ where
         cs: ConstraintSystemRef<ConstraintF<C>>,
     ) -> Result<(), SynthesisError> {
         let parameters =
-            ParametersVar::new_constant(ark_relations::ns!(cs, "parameters"), &self.params)?;
+            ParametersVar::new_constant(ark_relations::ns!(cs, "parameters"), self.params)?;
 
         let pub_key =
             PublicKeyVar::<C, GC>::new_input(ark_relations::ns!(cs, "public key"), || {
@@ -311,13 +342,10 @@ where
         )
         .unwrap();
 
-        let v = BlindSigVerifyGadget::<MSG_LEN, C, GC>::verify(
-            &parameters,
-            &poseidon_hash,
-            &m,
-            &signature,
-            &pub_key,
-        )?;
+        let v = <BlindSchnorrVerifyGadget<MSG_LEN, C, GC> as BlindSigVerifyGadget<
+            S,
+            ConstraintF<C>,
+        >>::verify(&parameters, &poseidon_hash, &m, &signature, &pub_key)?;
         v.enforce_equal(&Boolean::TRUE)
     }
 }
@@ -325,7 +353,8 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::schnorr_blind::{poseidon_setup_params, BlindSigScheme};
+    use crate::schnorr_blind::{poseidon_setup_params, SchnorrBlindSig};
+    use crate::BlindSignatureScheme;
     use ark_ed_on_bn254::constraints::EdwardsVar as BabyJubJubVar;
     use ark_ed_on_bn254::EdwardsProjective as BabyJubJub;
 
@@ -336,7 +365,7 @@ mod test {
 
     type Fq = <BabyJubJub as ProjectiveCurve>::BaseField;
     // type Fr = <BabyJubJub as ProjectiveCurve>::ScalarField;
-    type S = BlindSigScheme<BabyJubJub>;
+    type S = SchnorrBlindSig<BabyJubJub>;
 
     fn generate_single_sig_native_data(
         poseidon_hash: &poseidon::Poseidon<Fq>,
@@ -347,14 +376,14 @@ mod test {
         Signature<BabyJubJub>,
     ) {
         let mut rng = ark_std::test_rng();
-        let params = S::setup();
+        let params = S::setup(poseidon_hash);
         let (pk, sk) = S::keygen(&params, &mut rng);
         let (k, signer_r) = S::new_request_params(&params, &mut rng);
         let m = [Fq::from(1234), Fq::from(5689), Fq::from(3456)];
-        let (m_blinded, u) = S::blind(&params, &mut rng, &poseidon_hash, &m, pk, signer_r).unwrap();
+        let (m_blinded, u) = S::blind(&params, &mut rng, &m, pk, signer_r).unwrap();
         let s_blinded = S::blind_sign(sk, k, m_blinded);
         let s = S::unblind(s_blinded, &u);
-        let verified = S::verify(&params, &poseidon_hash, &m, s.clone(), pk);
+        let verified = S::verify(&params, &m, s.clone(), pk);
         assert!(verified);
         (params, pk, Msg(m), s)
     }
@@ -369,7 +398,6 @@ mod test {
         let (params, pk, m, s) = generate_single_sig_native_data(&poseidon_hash);
 
         // use the constraint system to verify the signature
-        type SG = BlindSigVerifyGadget<MSG_LEN, BabyJubJub, BabyJubJubVar>;
         let cs = ConstraintSystem::<Fq>::new_ref();
 
         let params_var =
@@ -383,14 +411,18 @@ mod test {
         let poseidon_hash_var =
             PoseidonGadget::<Fq>::from_native(&mut cs.clone(), poseidon_hash).unwrap();
 
-        let valid_sig = SG::verify(
-            &params_var,
-            &poseidon_hash_var,
-            &m_var,
-            &signature_var,
-            &pk_var,
-        )
-        .unwrap();
+        let valid_sig =
+            <BlindSchnorrVerifyGadget<MSG_LEN, BabyJubJub, BabyJubJubVar> as BlindSigVerifyGadget<
+                S,
+                ConstraintF<BabyJubJub>,
+            >>::verify(
+                &params_var,
+                &poseidon_hash_var,
+                &m_var,
+                &signature_var,
+                &pk_var,
+            )
+            .unwrap();
         valid_sig.enforce_equal(&Boolean::<Fq>::TRUE).unwrap();
         assert!(cs.is_satisfied().unwrap());
     }
@@ -405,13 +437,14 @@ mod test {
         let (params, pk, m, s) = generate_single_sig_native_data(&poseidon_hash);
 
         // use the constraint system to verify the signature
-        let circuit = BlindSigVerifyCircuit::<MSG_LEN, BabyJubJub, BabyJubJubVar> {
+        let circuit = BlindSigVerifyCircuit::<S, MSG_LEN, BabyJubJub, BabyJubJubVar> {
             params,
             poseidon_hash_native: poseidon_hash.clone(),
             signature: Some(s),
             pub_key: Some(pk),
             message: Some(m),
             _group: PhantomData,
+            _s: PhantomData,
         };
         let cs = ConstraintSystem::<Fq>::new_ref();
         circuit.generate_constraints(cs.clone()).unwrap();

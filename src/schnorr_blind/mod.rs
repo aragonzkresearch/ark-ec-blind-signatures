@@ -4,7 +4,7 @@
 use crate::BlindSignatureScheme;
 
 // #[cfg(feature="r1cs")]
-// pub mod constraints;
+pub mod constraints;
 
 use ark_ec::{models::twisted_edwards_extended::GroupAffine, AffineCurve, ProjectiveCurve};
 
