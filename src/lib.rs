@@ -1,5 +1,8 @@
 use ark_std::rand::Rng;
 
+// #[cfg(feature="r1cs")]
+pub mod constraints;
+
 pub mod mala_nezhadansari;
 pub mod schnorr_blind;
 
@@ -14,6 +17,7 @@ pub trait BlindSignatureScheme {
     type PointAffine;
     type SecretKey;
     type PublicKey;
+    // type Msg;
     type BlindedSignature;
     type Signature;
     type UserSecretData;
